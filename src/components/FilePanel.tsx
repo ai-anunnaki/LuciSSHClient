@@ -17,15 +17,17 @@ interface TransferItem {
 interface Props {
   connId: string
   onClose: () => void
+  syncPath?: string  // 从终端同步过来的当前目录
 }
 
-export default function FilePanel({ connId, onClose }: Props) {
+export default function FilePanel({ connId, onClose, syncPath }: Props) {
   const [currentPath, setCurrentPath] = useState('/')
   const [files, setFiles] = useState<FileItem[]>([])
   const [loading, setLoading] = useState(false)
   const [transfers, setTransfers] = useState<TransferItem[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
+  const [syncEnabled, setSyncEnabled] = useState(true) // 是否启用目录同步
   const api = (window as any).electronAPI
 
   const loadFiles = useCallback(async (path: string) => {
@@ -53,6 +55,13 @@ export default function FilePanel({ connId, onClose }: Props) {
       ))
     })
   }, [])
+
+  // 监听终端目录变化，同步文件面板
+  useEffect(() => {
+    if (syncEnabled && syncPath && syncPath !== currentPath) {
+      loadFiles(syncPath)
+    }
+  }, [syncPath, syncEnabled])
 
   // 拖拽上传
   const handleDragOver = (e: React.DragEvent) => {
@@ -174,6 +183,19 @@ export default function FilePanel({ connId, onClose }: Props) {
       {/* 头部 */}
       <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
         <span style={{ flex: 1, fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>📁 文件管理</span>
+        {/* 目录同步开关 */}
+        <button
+          onClick={() => setSyncEnabled(p => !p)}
+          title={syncEnabled ? '同步终端目录（点击关闭）' : '已关闭同步（点击开启）'}
+          style={{
+            ...smallBtn,
+            color: syncEnabled ? 'var(--success)' : 'var(--text-secondary)',
+            background: syncEnabled ? 'rgba(80,250,123,0.1)' : 'var(--bg-hover)',
+            fontSize: 11, fontWeight: 600
+          }}
+        >
+          {syncEnabled ? '⇄ 同步' : '⇄ 手动'}
+        </button>
         <button onClick={handleUpload} style={smallBtn} title="上传文件">⬆</button>
         <button onClick={() => loadFiles(currentPath)} style={smallBtn} title="刷新">↺</button>
         <button onClick={onClose} style={{ ...smallBtn, color: 'var(--danger)' }}>✕</button>

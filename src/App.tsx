@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useCallback } from 'react'
 import Sidebar from './components/Sidebar'
 import Terminal from './components/Terminal'
 import FilePanel from './components/FilePanel'
@@ -11,6 +11,7 @@ export interface Connection {
   username: string
   connId?: string
   status: 'connected' | 'connecting' | 'disconnected'
+  cwd?: string
 }
 
 export interface SavedHost {
@@ -30,9 +31,8 @@ export default function App() {
   const [showConnectModal, setShowConnectModal] = useState(false)
   const [showFilePanel, setShowFilePanel] = useState(false)
   const [savedHosts, setSavedHosts] = useState<SavedHost[]>(() => {
-    try {
-      return JSON.parse(localStorage.getItem('savedHosts') || '[]')
-    } catch { return [] }
+    try { return JSON.parse(localStorage.getItem('savedHosts') || '[]') }
+    catch { return [] }
   })
 
   const handleConnect = async (config: any) => {
@@ -42,7 +42,8 @@ export default function App() {
       label: config.label || `${config.username}@${config.host}`,
       host: config.host,
       username: config.username,
-      status: 'connecting'
+      status: 'connecting',
+      cwd: '~'
     }
 
     setConnections(prev => [...prev, newConn])
@@ -53,25 +54,19 @@ export default function App() {
       const result = await (window as any).electronAPI.sshConnect(config)
       if (result.success) {
         setConnections(prev => prev.map(c =>
-          c.id === tempId
-            ? { ...c, connId: result.connId, status: 'connected' }
-            : c
+          c.id === tempId ? { ...c, connId: result.connId, status: 'connected' } : c
         ))
       }
-    } catch (err: any) {
+    } catch {
       setConnections(prev => prev.map(c =>
         c.id === tempId ? { ...c, status: 'disconnected' } : c
       ))
     }
 
-    // 保存主机
     if (config.save) {
       const newHost: SavedHost = {
-        id: tempId,
-        label: config.label || `${config.username}@${config.host}`,
-        host: config.host,
-        port: config.port || 22,
-        username: config.username,
+        id: tempId, label: config.label || `${config.username}@${config.host}`,
+        host: config.host, port: config.port || 22, username: config.username,
         authType: config.authType,
         ...(config.authType === 'password' ? { password: config.password } : { privateKeyPath: config.privateKeyPath })
       }
@@ -83,9 +78,7 @@ export default function App() {
 
   const handleCloseTab = (id: string) => {
     const conn = connections.find(c => c.id === id)
-    if (conn?.connId) {
-      (window as any).electronAPI.sshDisconnect(conn.connId)
-    }
+    if (conn?.connId) (window as any).electronAPI.sshDisconnect(conn.connId)
     setConnections(prev => prev.filter(c => c.id !== id))
     if (activeConnId === id) {
       const remaining = connections.filter(c => c.id !== id)
@@ -93,15 +86,18 @@ export default function App() {
     }
   }
 
+  // 接收终端 cwd 变化，同步到连接状态
+  const handleCwdChange = useCallback((tabId: string, cwd: string) => {
+    setConnections(prev => prev.map(c => c.id === tabId ? { ...c, cwd } : c))
+  }, [])
+
   const activeConn = connections.find(c => c.id === activeConnId)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg-primary)' }}>
-      {/* macOS拖拽区域 */}
       <div className="titlebar" />
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        {/* 侧边栏 */}
         <Sidebar
           savedHosts={savedHosts}
           connections={connections}
@@ -118,52 +114,49 @@ export default function App() {
           }}
         />
 
-        {/* 主区域：终端 + 文件面板 */}
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
           {/* 终端区域 */}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             {/* 标签页 */}
             {connections.length > 0 && (
               <div style={{
-                display: 'flex',
-                background: 'var(--bg-secondary)',
-                borderBottom: '1px solid var(--border)',
-                overflowX: 'auto',
-                flexShrink: 0
+                display: 'flex', background: 'var(--bg-secondary)',
+                borderBottom: '1px solid var(--border)', overflowX: 'auto', flexShrink: 0
               }}>
                 {connections.map(conn => (
                   <div
                     key={conn.id}
                     onClick={() => setActiveConnId(conn.id)}
                     style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      padding: '6px 14px',
-                      cursor: 'pointer',
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '6px 14px', cursor: 'pointer',
                       borderRight: '1px solid var(--border)',
                       background: conn.id === activeConnId ? 'var(--bg-tertiary)' : 'transparent',
-                      whiteSpace: 'nowrap',
                       color: conn.id === activeConnId ? 'var(--text-primary)' : 'var(--text-secondary)',
-                      fontSize: 13
+                      whiteSpace: 'nowrap', fontSize: 13
                     }}
                   >
                     <span style={{
-                      width: 7, height: 7, borderRadius: '50%',
+                      width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
                       background: conn.status === 'connected' ? 'var(--success)' :
-                        conn.status === 'connecting' ? 'var(--warning)' : 'var(--danger)',
-                      flexShrink: 0
+                        conn.status === 'connecting' ? 'var(--warning)' : 'var(--danger)'
                     }} />
-                    {conn.label}
+                    <span style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>{conn.label}</span>
+                    {/* 当前目录提示 */}
+                    {conn.cwd && conn.id === activeConnId && (
+                      <span style={{ fontSize: 10, color: 'var(--text-secondary)', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {conn.cwd}
+                      </span>
+                    )}
                     <span
                       onClick={(e) => { e.stopPropagation(); handleCloseTab(conn.id) }}
-                      style={{ marginLeft: 4, opacity: 0.5, cursor: 'pointer', lineHeight: 1 }}
+                      style={{ marginLeft: 2, opacity: 0.4, cursor: 'pointer' }}
                     >✕</span>
                   </div>
                 ))}
                 <div
                   onClick={() => setShowConnectModal(true)}
-                  style={{ padding: '6px 14px', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: 18, lineHeight: 1.4 }}
+                  style={{ padding: '6px 14px', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: 18 }}
                 >+</div>
               </div>
             )}
@@ -174,15 +167,17 @@ export default function App() {
                 <WelcomeScreen onConnect={() => setShowConnectModal(true)} />
               ) : (
                 connections.map(conn => (
-                  <div
-                    key={conn.id}
-                    style={{ height: '100%', display: conn.id === activeConnId ? 'block' : 'none' }}
-                  >
-                    {conn.connId && <Terminal connId={conn.connId} active={conn.id === activeConnId} />}
+                  <div key={conn.id} style={{ height: '100%', display: conn.id === activeConnId ? 'block' : 'none' }}>
+                    {conn.connId && (
+                      <Terminal
+                        connId={conn.connId}
+                        active={conn.id === activeConnId}
+                        onCwdChange={(cwd) => handleCwdChange(conn.id, cwd)}
+                      />
+                    )}
                     {conn.status === 'connecting' && (
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-secondary)', gap: 10 }}>
-                        <span style={{ animation: 'spin 1s linear infinite' }}>⏳</span>
-                        正在连接 {conn.host}...
+                        <span>⏳</span> 正在连接 {conn.host}...
                       </div>
                     )}
                   </div>
@@ -191,17 +186,17 @@ export default function App() {
             </div>
           </div>
 
-          {/* 文件面板 */}
+          {/* 文件面板 - 接收 cwd 同步 */}
           {showFilePanel && activeConn?.connId && activeConn.status === 'connected' && (
             <FilePanel
               connId={activeConn.connId}
+              syncPath={activeConn.cwd}
               onClose={() => setShowFilePanel(false)}
             />
           )}
         </div>
       </div>
 
-      {/* 连接弹窗 */}
       {showConnectModal && (
         <ConnectModal
           onConnect={handleConnect}
@@ -214,20 +209,13 @@ export default function App() {
 
 function WelcomeScreen({ onConnect }: { onConnect: () => void }) {
   return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      height: '100%', gap: 20, color: 'var(--text-secondary)'
-    }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 20, color: 'var(--text-secondary)' }}>
       <div style={{ fontSize: 64 }}>🐦</div>
       <div style={{ fontSize: 22, color: 'var(--text-primary)', fontWeight: 600 }}>鸬鹚SSH客户端</div>
       <div style={{ fontSize: 14 }}>简洁 · 跨平台 · 支持拖拽文件传输</div>
       <button
         onClick={onConnect}
-        style={{
-          marginTop: 10, padding: '10px 28px', background: 'var(--accent)',
-          color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer',
-          fontSize: 14, fontWeight: 600, letterSpacing: 0.5
-        }}
+        style={{ marginTop: 10, padding: '10px 28px', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 14, fontWeight: 600 }}
       >
         + 新建连接
       </button>

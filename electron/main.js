@@ -63,8 +63,33 @@ ipcMain.handle('ssh:connect', async (event, config) => {
 
         sshConnections.get(connId).stream = stream
 
+        // 追踪当前目录
+        let outputBuffer = ''
+        let lastCwd = null
+
+        // 连接后立即注入 PROMPT_COMMAND 来广播 OSC7 目录信息
+        setTimeout(() => {
+          stream.write(
+            'export PROMPT_COMMAND=\'printf "\\033]7;file://$HOSTNAME$PWD\\033\\\\"\'$\'\\n\'' +
+            ' 2>/dev/null; echo\n'
+          )
+        }, 500)
+
         stream.on('data', (data) => {
-          mainWindow.webContents.send(`ssh:data:${connId}`, data.toString())
+          const str = data.toString()
+          mainWindow.webContents.send(`ssh:data:${connId}`, str)
+
+          // 解析 OSC 7 (file:// URL) 来同步目录
+          outputBuffer += str
+          const oscMatch = outputBuffer.match(/\x1b\]7;file:\/\/[^/]*(\/.+?)\x07/)
+          if (oscMatch) {
+            const newCwd = decodeURIComponent(oscMatch[1]).trim()
+            if (newCwd && newCwd !== lastCwd) {
+              lastCwd = newCwd
+              mainWindow.webContents.send(`ssh:cwd:${connId}`, newCwd)
+            }
+          }
+          if (outputBuffer.length > 8192) outputBuffer = outputBuffer.slice(-2048)
         })
 
         stream.stderr.on('data', (data) => {

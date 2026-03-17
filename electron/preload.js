@@ -8,7 +8,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sshDisconnect: (connId) => ipcRenderer.invoke('ssh:disconnect', { connId }),
   onSshData: (connId, callback) => ipcRenderer.on(`ssh:data:${connId}`, (_, data) => callback(data)),
   onSshClosed: (connId, callback) => ipcRenderer.on(`ssh:closed:${connId}`, callback),
+  onSshCwd: (connId, callback) => ipcRenderer.on(`ssh:cwd:${connId}`, (_, cwd) => callback(cwd)),
   offSshData: (connId) => ipcRenderer.removeAllListeners(`ssh:data:${connId}`),
+  offSshCwd: (connId) => ipcRenderer.removeAllListeners(`ssh:cwd:${connId}`),
 
   // SFTP
   sftpList: (connId, remotePath) => ipcRenderer.invoke('sftp:list', { connId, remotePath }),
