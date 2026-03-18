@@ -20,6 +20,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sftpMkdir: (connId, remotePath) => ipcRenderer.invoke('sftp:mkdir', { connId, remotePath }),
   onSftpProgress: (callback) => ipcRenderer.on('sftp:progress', (_, data) => callback(data)),
 
+  // 连通性测试
+  sshTest: (config) => ipcRenderer.invoke('ssh:test', config),
+
   // 文件对话框
   openFile: () => ipcRenderer.invoke('dialog:openFile'),
   openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),

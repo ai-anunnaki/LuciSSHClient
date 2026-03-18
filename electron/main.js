@@ -302,3 +302,46 @@ ipcMain.handle('dialog:openDirectory', async () => {
   })
   return result.filePaths[0]
 })
+
+// 连通性测试（不开 shell，只做 TCP 握手 + 认证）
+ipcMain.handle('ssh:test', async (event, config) => {
+  return new Promise((resolve) => {
+    const conn = new Client()
+    const timer = setTimeout(() => {
+      conn.destroy()
+      resolve({ success: false, error: '连接超时（10s）' })
+    }, 10000)
+
+    conn.on('ready', () => {
+      clearTimeout(timer)
+      conn.end()
+      resolve({ success: true, message: '连接成功！认证通过' })
+    })
+
+    conn.on('error', (err) => {
+      clearTimeout(timer)
+      resolve({ success: false, error: err.message })
+    })
+
+    const sshConfig = {
+      host: config.host,
+      port: config.port || 22,
+      username: config.username,
+      readyTimeout: 10000,
+    }
+
+    if (config.authType === 'privateKey' && config.privateKeyPath) {
+      try {
+        sshConfig.privateKey = require('fs').readFileSync(config.privateKeyPath)
+        if (config.passphrase) sshConfig.passphrase = config.passphrase
+      } catch (e) {
+        resolve({ success: false, error: '私钥文件读取失败：' + e.message })
+        return
+      }
+    } else {
+      sshConfig.password = config.password
+    }
+
+    conn.connect(sshConfig)
+  })
+})

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -19,34 +19,36 @@ interface Props {
 }
 
 export default function Terminal({ connId, active, onCwdChange }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const termRef = useRef<HTMLDivElement>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)   // 外层容器（用于拖拽检测）
+  const termRef = useRef<HTMLDivElement>(null)   // xterm 挂载点
   const xtermRef = useRef<XTerm | null>(null)
-  const fitAddonRef = useRef<FitAddon | null>(null)
-  const cwdRef = useRef<string>('~')
-  const api = (window as any).electronAPI
-
-  const [isDragging, setIsDragging] = useState(false)
-  const [dragCount, setDragCount] = useState(0) // 用计数解决拖出子元素误触
+  const fitRef = useRef<FitAddon | null>(null)
+  const initializedRef = useRef(false)
+  const [dragging, setDragging] = useState(false)
   const [transfers, setTransfers] = useState<TransferFile[]>([])
-  const [showOverlay, setShowOverlay] = useState(false)
+  const [cwd, setCwd] = useState('~')
+  const electronAPI = (window as any).electronAPI
 
-  // 初始化 xterm
+  // ── 初始化 xterm（只执行一次）──────────────────────────────
   useEffect(() => {
-    if (!termRef.current) return
+    if (initializedRef.current || !termRef.current) return
+    initializedRef.current = true
 
     const term = new XTerm({
       theme: {
-        background: '#0d0d1a', foreground: '#f8f8f2', cursor: '#50fa7b',
-        black: '#21222c', red: '#ff5555', green: '#50fa7b',
-        yellow: '#f1fa8c', blue: '#6272a4', magenta: '#ff79c6',
-        cyan: '#8be9fd', white: '#f8f8f2',
+        background: '#0d0d1a', foreground: '#f8f8f2',
+        cursor: '#f8f8f2', selectionBackground: 'rgba(91,141,238,0.3)',
+        black: '#21222c', red: '#ff5555', green: '#50fa7b', yellow: '#f1fa8c',
+        blue: '#5b8dee', magenta: '#ff79c6', cyan: '#8be9fd', white: '#f8f8f2',
         brightBlack: '#6272a4', brightRed: '#ff6e6e', brightGreen: '#69ff94',
         brightYellow: '#ffffa5', brightBlue: '#d6acff', brightMagenta: '#ff92df',
         brightCyan: '#a4ffff', brightWhite: '#ffffff',
       },
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace",
-      fontSize: 13, lineHeight: 1.4, cursorBlink: true, scrollback: 5000,
+      fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, monospace',
+      fontSize: 13,
+      lineHeight: 1.4,
+      cursorBlink: true,
+      scrollback: 5000,
       allowProposedApi: true,
     })
 
@@ -55,270 +57,158 @@ export default function Terminal({ connId, active, onCwdChange }: Props) {
     term.loadAddon(new WebLinksAddon())
     term.open(termRef.current)
 
-    xtermRef.current = term
-    fitAddonRef.current = fitAddon
-
+    // 延迟 fit，确保容器已有尺寸
     setTimeout(() => {
       fitAddon.fit()
-      api.sshResize(connId, term.cols, term.rows)
-    }, 50)
+      electronAPI.sshResize(connId, term.cols, term.rows)
+    }, 100)
 
-    // SSH 数据
-    api.onSshData(connId, (data: string) => term.write(data))
+    xtermRef.current = term
+    fitRef.current = fitAddon
 
-    // 目录同步
-    api.onSshCwd(connId, (cwd: string) => {
-      cwdRef.current = cwd
-      onCwdChange?.(cwd)
-    })
+    // 键盘输入 → SSH
+    term.onData((data) => electronAPI.sshWrite(connId, data))
 
-    // 用户输入
-    term.onData((data) => api.sshWrite(connId, data))
+    // SSH 数据 → 终端
+    electronAPI.onSshData(connId, (data: string) => term.write(data))
 
     // 连接关闭
-    api.onSshClosed(connId, () => {
+    electronAPI.onSshClosed(connId, () => {
       term.write('\r\n\x1b[33m[连接已断开]\x1b[0m\r\n')
     })
 
-    // SFTP 进度
-    api.onSftpProgress((data: any) => {
-      setTransfers(prev => prev.map(t =>
-        t.name === data.file
-          ? { ...t, percent: data.percent, status: data.percent >= 100 ? 'done' : 'uploading' }
-          : t
-      ))
+    // 目录同步（OSC7）
+    electronAPI.onSshCwd(connId, (newCwd: string) => {
+      setCwd(newCwd)
+      onCwdChange?.(newCwd)
     })
 
-    // resize
+    // 窗口 resize
     const ro = new ResizeObserver(() => {
-      try { fitAddon.fit(); api.sshResize(connId, term.cols, term.rows) } catch {}
+      try { fitAddon.fit(); electronAPI.sshResize(connId, term.cols, term.rows) } catch {}
     })
     if (termRef.current.parentElement) ro.observe(termRef.current.parentElement)
 
     return () => {
-      api.offSshData(connId)
-      api.offSshCwd(connId)
+      electronAPI.offSshData(connId)
+      electronAPI.offSshCwd(connId)
       ro.disconnect()
       term.dispose()
     }
   }, [connId])
 
-  // 激活时聚焦并 refit
+  // ── 标签页激活时重新 fit + 聚焦 ──────────────────────────
   useEffect(() => {
-    if (active) {
-      setTimeout(() => {
-        try { fitAddonRef.current?.fit() } catch {}
+    if (!active) return
+    setTimeout(() => {
+      try {
+        fitRef.current?.fit()
+        electronAPI.sshResize(connId, xtermRef.current!.cols, xtermRef.current!.rows)
         xtermRef.current?.focus()
-      }, 50)
-    }
+      } catch {}
+    }, 60)
   }, [active])
 
-  // ========================
-  // 拖拽上传逻辑
-  // ========================
-  const handleDragEnter = useCallback((e: React.DragEvent) => {
+  // ── 拖拽上传 ─────────────────────────────────────────────
+  const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setDragging(true) }
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (!wrapRef.current?.contains(e.relatedTarget as Node)) setDragging(false)
+  }
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault()
-    setDragCount(c => {
-      if (c === 0) setIsDragging(true)
-      return c + 1
-    })
-  }, [])
+    setDragging(false)
+    const files = Array.from(e.dataTransfer.files)
+    if (!files.length) return
 
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setDragCount(c => {
-      const next = c - 1
-      if (next <= 0) { setIsDragging(false); return 0 }
-      return next
-    })
-  }, [])
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'copy'
-  }, [])
-
-  const handleDrop = useCallback(async (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(false)
-    setDragCount(0)
-
-    const droppedFiles = Array.from(e.dataTransfer.files)
-    if (!droppedFiles.length) return
-
-    const targetDir = cwdRef.current || '~'
-
-    // 加入待上传列表
-    const newTransfers: TransferFile[] = droppedFiles.map(f => ({
-      id: `${Date.now()}-${Math.random()}`,
-      name: f.name,
-      size: f.size,
-      percent: 0,
-      status: 'uploading'
-    }))
-    setTransfers(prev => [...prev, ...newTransfers])
-
-    // 逐个上传
-    for (let i = 0; i < droppedFiles.length; i++) {
-      const file = droppedFiles[i]
-      const transfer = newTransfers[i]
+    for (const file of files) {
+      const id = Math.random().toString(36).slice(2)
       const localPath = (file as any).path
-      if (!localPath) {
-        setTransfers(prev => prev.map(t => t.id === transfer.id ? { ...t, status: 'error' } : t))
-        continue
-      }
+      if (!localPath) continue
+      const remotePath = `${cwd}/${file.name}`
+
+      setTransfers(prev => [...prev, { id, name: file.name, size: file.size, percent: 0, status: 'uploading' }])
+      xtermRef.current?.write(`\r\n\x1b[36m[上传] ${file.name} → ${remotePath}\x1b[0m\r\n`)
 
       try {
-        await api.sftpUpload(connId, localPath, targetDir + '/')
-        setTransfers(prev => prev.map(t => t.id === transfer.id ? { ...t, percent: 100, status: 'done' } : t))
-        // 在终端显示上传成功提示
-        xtermRef.current?.write(`\r\n\x1b[32m✓ 已上传: ${file.name} → ${targetDir}/\x1b[0m\r\n`)
-      } catch (err: any) {
-        setTransfers(prev => prev.map(t => t.id === transfer.id ? { ...t, status: 'error' } : t))
-        xtermRef.current?.write(`\r\n\x1b[31m✗ 上传失败: ${file.name}\x1b[0m\r\n`)
+        await electronAPI.sftpUpload(connId, localPath, remotePath)
+        setTransfers(prev => prev.map(t => t.id === id ? { ...t, percent: 100, status: 'done' } : t))
+        xtermRef.current?.write(`\x1b[32m✓ 上传完成: ${file.name}\x1b[0m\r\n`)
+      } catch {
+        setTransfers(prev => prev.map(t => t.id === id ? { ...t, status: 'error' } : t))
+        xtermRef.current?.write(`\x1b[31m✗ 上传失败: ${file.name}\x1b[0m\r\n`)
       }
     }
-
-    // 3秒后清除完成的项目
-    setTimeout(() => {
-      setTransfers(prev => prev.filter(t => t.status !== 'done'))
-    }, 3000)
-  }, [connId])
-
-  const formatSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes}B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
-    return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+    setTimeout(() => setTransfers(prev => prev.filter(t => t.status === 'uploading')), 3000)
   }
+
+  const formatSize = (b: number) => b > 1048576 ? `${(b / 1048576).toFixed(1)}MB` : `${(b / 1024).toFixed(0)}KB`
 
   return (
     <div
-      ref={containerRef}
-      style={{ height: '100%', position: 'relative', display: 'flex', flexDirection: 'column' }}
-      onDragEnter={handleDragEnter}
-      onDragLeave={handleDragLeave}
+      ref={wrapRef}
+      style={{ position: 'relative', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
       onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {/* 终端本体 */}
-      <div ref={termRef} style={{ flex: 1, overflow: 'hidden', background: '#0d0d1a' }} />
+      {/* xterm 挂载点 — 始终渲染，用 visibility 控制显隐 */}
+      <div
+        ref={termRef}
+        style={{ flex: 1, minHeight: 0, padding: '4px 0', background: '#0d0d1a', visibility: active ? 'visible' : 'hidden' }}
+      />
 
-      {/* 拖拽遮罩层 */}
-      {isDragging && (
+      {/* 拖拽遮罩 */}
+      {dragging && (
         <div style={{
-          position: 'absolute', inset: 0, zIndex: 20,
+          position: 'absolute', inset: 0, zIndex: 10,
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          gap: 16,
-          // 动画背景
-          background: 'rgba(91,141,238,0.12)',
-          backdropFilter: 'blur(2px)',
-          animation: 'dragPulse 1.2s ease-in-out infinite',
-          pointerEvents: 'none',
+          background: 'rgba(13,13,26,0.85)',
+          border: '2px dashed var(--accent)', borderRadius: 8,
+          animation: 'dragPulse 1s ease-in-out infinite',
+          gap: 12,
         }}>
-          {/* 虚线边框 */}
-          <div style={{
-            position: 'absolute', inset: 12,
-            border: '2px dashed var(--accent)',
-            borderRadius: 16,
-            animation: 'dashRotate 8s linear infinite',
-          }} />
-
-          {/* 图标和文字 */}
-          <div style={{
-            fontSize: 56,
-            animation: 'bounce 0.8s ease-in-out infinite alternate',
-            filter: 'drop-shadow(0 0 20px rgba(91,141,238,0.8))',
-          }}>📤</div>
-          <div style={{ color: 'var(--accent)', fontWeight: 700, fontSize: 18, letterSpacing: 1 }}>
-            松开即可上传
-          </div>
-          <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
-            上传到：{cwdRef.current || '~'}
-          </div>
+          <div style={{ fontSize: 48, animation: 'bounce 0.6s ease-in-out infinite alternate' }}>⬆️</div>
+          <div style={{ color: 'var(--accent)', fontWeight: 700, fontSize: 16 }}>松开即可上传</div>
+          <div style={{ color: 'var(--text-secondary)', fontSize: 12 }}>上传到：{cwd}</div>
         </div>
       )}
 
       {/* 传输进度浮层 */}
       {transfers.length > 0 && (
         <div style={{
-          position: 'absolute', bottom: 16, right: 16, zIndex: 30,
-          width: 280, background: 'rgba(18,18,42,0.95)',
-          border: '1px solid var(--border)', borderRadius: 10,
-          boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-          overflow: 'hidden',
-          animation: 'slideUp 0.2s ease-out',
+          position: 'absolute', bottom: 12, right: 12, zIndex: 20,
+          background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+          borderRadius: 10, padding: '10px 14px', minWidth: 240,
+          boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
+          animation: 'slideUp 0.2s ease',
         }}>
-          <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, fontWeight: 700, color: 'var(--text-secondary)', display: 'flex', justifyContent: 'space-between' }}>
-            <span>文件传输</span>
-            <span>{transfers.filter(t => t.status === 'done').length}/{transfers.length}</span>
-          </div>
-          <div style={{ maxHeight: 200, overflow: 'auto' }}>
-            {transfers.map(t => (
-              <div key={t.id} style={{ padding: '8px 12px', borderBottom: '1px solid rgba(42,42,74,0.5)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                  <span style={{ fontSize: 14 }}>
-                    {t.status === 'done' ? '✅' : t.status === 'error' ? '❌' : '⬆️'}
-                  </span>
-                  <span style={{
-                    flex: 1, fontSize: 12, color: 'var(--text-primary)',
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
-                  }}>{t.name}</span>
-                  <span style={{ fontSize: 11, color: 'var(--text-secondary)', flexShrink: 0 }}>
-                    {t.status === 'error' ? '失败' : t.status === 'done' ? '完成' : `${t.percent}%`}
-                  </span>
-                </div>
-                {/* 进度条 */}
-                {t.status !== 'error' && (
-                  <div style={{ height: 3, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
-                    <div style={{
-                      height: '100%', borderRadius: 2,
-                      width: `${t.percent}%`,
-                      background: t.status === 'done'
-                        ? 'var(--success)'
-                        : 'linear-gradient(90deg, var(--accent), #a78bfa)',
-                      transition: 'width 0.3s ease',
-                      // 上传中的闪烁效果
-                      animation: t.status === 'uploading' && t.percent > 0 && t.percent < 100
-                        ? 'shimmer 1.5s ease-in-out infinite'
-                        : 'none',
-                    }} />
-                  </div>
-                )}
-                {t.size > 0 && (
-                  <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 3 }}>
-                    {formatSize(Math.round(t.size * t.percent / 100))} / {formatSize(t.size)}
-                  </div>
-                )}
+          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 8 }}>文件传输</div>
+          {transfers.map(t => (
+            <div key={t.id} style={{ marginBottom: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
+                <span style={{ color: 'var(--text-primary)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
+                <span style={{ color: t.status === 'error' ? 'var(--danger)' : t.status === 'done' ? 'var(--success)' : 'var(--accent)', marginLeft: 8 }}>
+                  {t.status === 'error' ? '失败' : t.status === 'done' ? '✓' : `${t.percent}%`}
+                </span>
               </div>
-            ))}
-          </div>
+              <div style={{ height: 3, background: 'var(--border)', borderRadius: 2 }}>
+                <div style={{
+                  height: '100%', borderRadius: 2, transition: 'width 0.3s',
+                  width: `${t.percent}%`,
+                  background: t.status === 'error' ? 'var(--danger)' : t.status === 'done' ? 'var(--success)' : 'var(--accent)',
+                  animation: t.status === 'uploading' ? 'shimmer 1.5s infinite' : 'none',
+                }} />
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
-      {/* CSS 动画 */}
       <style>{`
-        @keyframes dragPulse {
-          0%, 100% { background: rgba(91,141,238,0.10); }
-          50%       { background: rgba(91,141,238,0.20); }
-        }
-        @keyframes bounce {
-          from { transform: translateY(0px); }
-          to   { transform: translateY(-12px); }
-        }
-        @keyframes slideUp {
-          from { opacity: 0; transform: translateY(10px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes shimmer {
-          0%   { box-shadow: 0 0 0 0 rgba(91,141,238,0.4); }
-          50%  { box-shadow: 0 0 8px 2px rgba(91,141,238,0.6); }
-          100% { box-shadow: 0 0 0 0 rgba(91,141,238,0.4); }
-        }
-        @keyframes dashRotate {
-          from { border-color: var(--accent); }
-          50%  { border-color: #a78bfa; }
-          to   { border-color: var(--accent); }
-        }
+        @keyframes dragPulse { 0%,100%{background:rgba(13,13,26,0.85)} 50%{background:rgba(13,13,26,0.92)} }
+        @keyframes bounce { from{transform:translateY(0)} to{transform:translateY(-10px)} }
+        @keyframes slideUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes shimmer { 0%,100%{box-shadow:0 0 0 0 rgba(91,141,238,0.4)} 50%{box-shadow:0 0 6px 2px rgba(91,141,238,0.6)} }
       `}</style>
     </div>
   )

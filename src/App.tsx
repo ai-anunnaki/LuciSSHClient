@@ -23,184 +23,199 @@ export interface SavedHost {
   authType: 'password' | 'privateKey'
   password?: string
   privateKeyPath?: string
+  passphrase?: string
 }
+
+const api = () => (window as any).electronAPI
 
 export default function App() {
   const [connections, setConnections] = useState<Connection[]>([])
   const [activeConnId, setActiveConnId] = useState<string | null>(null)
-  const [showConnectModal, setShowConnectModal] = useState(false)
   const [showFilePanel, setShowFilePanel] = useState(false)
+  const [showConnectModal, setShowConnectModal] = useState(false)
+  const [editingHost, setEditingHost] = useState<SavedHost | null>(null)
   const [savedHosts, setSavedHosts] = useState<SavedHost[]>(() => {
-    try { return JSON.parse(localStorage.getItem('savedHosts') || '[]') }
-    catch { return [] }
+    try { return JSON.parse(localStorage.getItem('savedHosts') || '[]') } catch { return [] }
   })
 
-  const handleConnect = async (config: any) => {
-    const tempId = Date.now().toString()
+  const persistHosts = (hosts: SavedHost[]) => {
+    setSavedHosts(hosts)
+    localStorage.setItem('savedHosts', JSON.stringify(hosts))
+  }
+
+  const handleConnect = useCallback(async (config: any) => {
+    const id = Date.now().toString()
     const newConn: Connection = {
-      id: tempId,
-      label: config.label || `${config.username}@${config.host}`,
-      host: config.host,
-      username: config.username,
-      status: 'connecting',
-      cwd: '~'
+      id, label: config.label || `${config.username}@${config.host}`,
+      host: config.host, username: config.username, status: 'connecting'
+    }
+    setConnections(prev => [...prev, newConn])
+    setActiveConnId(id)
+
+    if (config.save) {
+      const host: SavedHost = {
+        id: config.existingId || Date.now().toString(),
+        label: config.label || `${config.username}@${config.host}`,
+        host: config.host, port: config.port || 22,
+        username: config.username, authType: config.authType,
+        password: config.password, privateKeyPath: config.privateKeyPath,
+        passphrase: config.passphrase
+      }
+      const existing = savedHosts.findIndex(h => h.id === host.id)
+      const updated = existing >= 0
+        ? savedHosts.map((h, i) => i === existing ? host : h)
+        : [...savedHosts, host]
+      persistHosts(updated)
     }
 
-    setConnections(prev => [...prev, newConn])
-    setActiveConnId(tempId)
-    setShowConnectModal(false)
-
     try {
-      const result = await (window as any).electronAPI.sshConnect(config)
+      const result = await api().sshConnect(config)
       if (result.success) {
         setConnections(prev => prev.map(c =>
-          c.id === tempId ? { ...c, connId: result.connId, status: 'connected' } : c
+          c.id === id ? { ...c, connId: result.connId, status: 'connected' } : c
+        ))
+      } else {
+        setConnections(prev => prev.map(c =>
+          c.id === id ? { ...c, status: 'disconnected' } : c
         ))
       }
     } catch {
       setConnections(prev => prev.map(c =>
-        c.id === tempId ? { ...c, status: 'disconnected' } : c
+        c.id === id ? { ...c, status: 'disconnected' } : c
       ))
     }
+  }, [savedHosts])
 
-    if (config.save) {
-      const newHost: SavedHost = {
-        id: tempId, label: config.label || `${config.username}@${config.host}`,
-        host: config.host, port: config.port || 22, username: config.username,
-        authType: config.authType,
-        ...(config.authType === 'password' ? { password: config.password } : { privateKeyPath: config.privateKeyPath })
-      }
-      const updated = [...savedHosts, newHost]
-      setSavedHosts(updated)
-      localStorage.setItem('savedHosts', JSON.stringify(updated))
-    }
-  }
+  const handleCwdChange = useCallback((connId: string, cwd: string) => {
+    setConnections(prev => prev.map(c => c.id === connId ? { ...c, cwd } : c))
+  }, [])
 
-  const handleCloseTab = (id: string) => {
-    const conn = connections.find(c => c.id === id)
-    if (conn?.connId) (window as any).electronAPI.sshDisconnect(conn.connId)
-    setConnections(prev => prev.filter(c => c.id !== id))
-    if (activeConnId === id) {
-      const remaining = connections.filter(c => c.id !== id)
-      setActiveConnId(remaining.length > 0 ? remaining[remaining.length - 1].id : null)
-    }
-  }
+  const handleCloseTab = useCallback((id: string) => {
+    setConnections(prev => {
+      const next = prev.filter(c => c.id !== id)
+      if (activeConnId === id) setActiveConnId(next.length > 0 ? next[next.length - 1].id : null)
+      return next
+    })
+  }, [activeConnId])
 
-  // 接收终端 cwd 变化，同步到连接状态
-  const handleCwdChange = useCallback((tabId: string, cwd: string) => {
-    setConnections(prev => prev.map(c => c.id === tabId ? { ...c, cwd } : c))
+  const handleDeleteHost = useCallback((id: string) => {
+    persistHosts(savedHosts.filter(h => h.id !== id))
+  }, [savedHosts])
+
+  const handleEditHost = useCallback((host: SavedHost) => {
+    setEditingHost(host)
+    setShowConnectModal(true)
   }, [])
 
   const activeConn = connections.find(c => c.id === activeConnId)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg-primary)' }}>
+      {/* macOS 拖拽标题栏 */}
       <div className="titlebar" />
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        {/* 侧边栏 */}
         <Sidebar
           savedHosts={savedHosts}
           connections={connections}
           activeConnId={activeConnId}
-          onConnect={() => setShowConnectModal(true)}
-          onSelectHost={(host) => handleConnect({ ...host, save: false })}
-          onSelectTab={setActiveConnId}
-          onToggleFiles={() => setShowFilePanel(p => !p)}
           showFilePanel={showFilePanel}
-          onDeleteHost={(id) => {
-            const updated = savedHosts.filter(h => h.id !== id)
-            setSavedHosts(updated)
-            localStorage.setItem('savedHosts', JSON.stringify(updated))
-          }}
+          onConnect={() => { setEditingHost(null); setShowConnectModal(true) }}
+          onSelectHost={(host) => { setEditingHost(null); handleConnect({ ...host, save: false }) }}
+          onSelectTab={setActiveConnId}
+          onCloseTab={handleCloseTab}
+          onToggleFiles={() => setShowFilePanel(p => !p)}
+          onDeleteHost={handleDeleteHost}
+          onEditHost={handleEditHost}
         />
 
-        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-          {/* 终端区域 */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            {/* 标签页 */}
-            {connections.length > 0 && (
-              <div style={{
-                display: 'flex', background: 'var(--bg-secondary)',
-                borderBottom: '1px solid var(--border)', overflowX: 'auto', flexShrink: 0
-              }}>
-                {connections.map(conn => (
-                  <div
-                    key={conn.id}
-                    onClick={() => setActiveConnId(conn.id)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '6px 14px', cursor: 'pointer',
-                      borderRight: '1px solid var(--border)',
-                      background: conn.id === activeConnId ? 'var(--bg-tertiary)' : 'transparent',
-                      color: conn.id === activeConnId ? 'var(--text-primary)' : 'var(--text-secondary)',
-                      whiteSpace: 'nowrap', fontSize: 13
-                    }}
-                  >
-                    <span style={{
-                      width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-                      background: conn.status === 'connected' ? 'var(--success)' :
-                        conn.status === 'connecting' ? 'var(--warning)' : 'var(--danger)'
-                    }} />
-                    <span style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>{conn.label}</span>
-                    {/* 当前目录提示 */}
-                    {conn.cwd && conn.id === activeConnId && (
-                      <span style={{ fontSize: 10, color: 'var(--text-secondary)', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {conn.cwd}
-                      </span>
-                    )}
-                    <span
-                      onClick={(e) => { e.stopPropagation(); handleCloseTab(conn.id) }}
-                      style={{ marginLeft: 2, opacity: 0.4, cursor: 'pointer' }}
-                    >✕</span>
-                  </div>
-                ))}
+        {/* 主区域 */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
+          {/* 标签栏 */}
+          {connections.length > 0 && (
+            <div style={{ display: 'flex', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border)', overflowX: 'auto', flexShrink: 0 }}>
+              {connections.map(conn => (
                 <div
-                  onClick={() => setShowConnectModal(true)}
-                  style={{ padding: '6px 14px', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: 18 }}
-                >+</div>
-              </div>
-            )}
-
-            {/* 终端内容 */}
-            <div style={{ flex: 1, overflow: 'hidden' }}>
-              {connections.length === 0 ? (
-                <WelcomeScreen onConnect={() => setShowConnectModal(true)} />
-              ) : (
-                connections.map(conn => (
-                  <div key={conn.id} style={{ height: '100%', display: conn.id === activeConnId ? 'block' : 'none' }}>
-                    {conn.connId && (
-                      <Terminal
-                        connId={conn.connId}
-                        active={conn.id === activeConnId}
-                        onCwdChange={(cwd) => handleCwdChange(conn.id, cwd)}
-                      />
-                    )}
-                    {conn.status === 'connecting' && (
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-secondary)', gap: 10 }}>
-                        <span>⏳</span> 正在连接 {conn.host}...
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
+                  key={conn.id}
+                  onClick={() => setActiveConnId(conn.id)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '6px 14px', cursor: 'pointer', whiteSpace: 'nowrap',
+                    borderRight: '1px solid var(--border)', fontSize: 12,
+                    background: conn.id === activeConnId ? 'var(--bg-primary)' : 'transparent',
+                    color: conn.id === activeConnId ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  }}
+                >
+                  <span style={{
+                    width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                    background: conn.status === 'connected' ? 'var(--success)' : conn.status === 'connecting' ? 'var(--warning)' : '#666'
+                  }} />
+                  <span>{conn.label}</span>
+                  {conn.cwd && <span style={{ fontSize: 10, opacity: 0.5, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>{conn.cwd}</span>}
+                  <button
+                    onClick={e => { e.stopPropagation(); handleCloseTab(conn.id) }}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', opacity: 0.5, padding: '0 2px', fontSize: 13, lineHeight: 1 }}
+                  >×</button>
+                </div>
+              ))}
             </div>
-          </div>
-
-          {/* 文件面板 - 接收 cwd 同步 */}
-          {showFilePanel && activeConn?.connId && activeConn.status === 'connected' && (
-            <FilePanel
-              connId={activeConn.connId}
-              syncPath={activeConn.cwd}
-              onClose={() => setShowFilePanel(false)}
-            />
           )}
+
+          {/* 终端区域 — 全部渲染，用 display 控制显隐，保证 xterm 容器始终存在 */}
+          <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+            {connections.length === 0 ? (
+              <WelcomeScreen onConnect={() => { setEditingHost(null); setShowConnectModal(true) }} />
+            ) : (
+              connections.map(conn => (
+                <div
+                  key={conn.id}
+                  style={{
+                    position: 'absolute', inset: 0,
+                    // 用 visibility + pointerEvents 代替 display:none，保证 xterm 能正确计算尺寸
+                    visibility: conn.id === activeConnId ? 'visible' : 'hidden',
+                    pointerEvents: conn.id === activeConnId ? 'auto' : 'none',
+                  }}
+                >
+                  {conn.connId && (
+                    <Terminal
+                      connId={conn.connId}
+                      active={conn.id === activeConnId}
+                      onCwdChange={(cwd) => handleCwdChange(conn.id, cwd)}
+                    />
+                  )}
+                  {conn.status === 'connecting' && (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-secondary)', gap: 10 }}>
+                      <span style={{ fontSize: 18 }}>⏳</span> 连接中 {conn.label}...
+                    </div>
+                  )}
+                  {conn.status === 'disconnected' && !conn.connId && (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--danger)', gap: 10 }}>
+                      <span style={{ fontSize: 18 }}>✕</span> 连接失败
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
         </div>
+
+        {/* 文件面板 */}
+        {showFilePanel && activeConn?.connId && (
+          <FilePanel
+            connId={activeConn.connId}
+            syncPath={activeConn.cwd}
+            onClose={() => setShowFilePanel(false)}
+          />
+        )}
       </div>
 
+      {/* 连接/编辑弹窗 */}
       {showConnectModal && (
         <ConnectModal
+          editHost={editingHost}
           onConnect={handleConnect}
-          onClose={() => setShowConnectModal(false)}
+          onClose={() => { setShowConnectModal(false); setEditingHost(null) }}
         />
       )}
     </div>
